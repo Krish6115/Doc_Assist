@@ -3,7 +3,7 @@
 > A patient-centric clinical Retrieval-Augmented Generation (RAG) system for querying unstructured medical corpora with low-latency re-ranking and context verification.
 
 **Repository:** https://github.com/Krish6115/Doc_Assist  
-**Status:** Live (as of Nov 2025)
+**Status:** Live
 
 ---
 
