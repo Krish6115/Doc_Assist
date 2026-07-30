@@ -1,152 +1,313 @@
 # Doc_Assist
 
-> A patient-centric clinical retrieval-augmented generation (RAG) system for querying unstructured medical corpora with low-latency re-ranking and context verification.
+> A patient-centric clinical Retrieval-Augmented Generation (RAG) system for querying unstructured medical corpora with low-latency re-ranking and context verification.
 
-Repository: [https://github.com/Krish6115/Doc_Assist](https://github.com/Krish6115/Doc_Assist)  
-Status: Live (as of Nov 2025)  
-
----
-
-## 1. Problem Statement
-
-Clinical documentation, medical reference guides, and EHR summaries are dense, unstructured, and often difficult for non-specialists to navigate. Standard semantic search over large medical datasets frequently yields low precision due to domain jargon, dense formatting, and irrelevant context fragments being passed into the LLM context window.
-
-`Doc_Assist` solves this gap by decoupling context retrieval into a two-pass pipeline: coarse-grained vector similarity search followed by lightweight cross-encoder re-ranking. This ensures that the downstream LLM receives only highly relevant context chunks, preventing hallucinations, reducing context noise, and optimizing prompt token size.
+**Repository:** https://github.com/Krish6115/Doc_Assist  
+**Status:** Live (as of Nov 2025)
 
 ---
 
-## 2. System Architecture
+# 1. Problem Statement
+
+Clinical documentation, medical reference guides, and EHR summaries are dense, unstructured, and often difficult for non-specialists to navigate. Standard semantic search over large medical datasets frequently yields low-precision results due to domain-specific jargon, fragmented context, and irrelevant passages entering the LLM context window.
+
+**Doc_Assist** addresses this challenge by implementing a **two-stage retrieval pipeline**:
+
+1. **Dense vector similarity retrieval**
+2. **Cross-encoder re-ranking**
+
+Instead of directly passing the highest vector matches to the LLM, the system first retrieves a broader candidate set and then re-ranks those candidates using a cross-encoder. This significantly reduces irrelevant context, minimizes hallucinations, improves grounding, and optimizes prompt token usage.
+
+---
+
+# 2. System Architecture
+
+```
 +-----------------------------------------+
-                                |               Next.js Client            |
-                                +-----------------------------------------+
-                                                     |  (HTTP POST /api/v1/query)
-                                                     v
-                                +-----------------------------------------+
-                                |              FastAPI Layer              |
-                                +-----------------------------------------+
-                                                     |
-                             +-----------------------+-----------------------+
-                             |                                               |
-                             v                                               v
-               +---------------------------+                   +---------------------------+
-               |  Dense Vector Search      |                   | Cross-Encoder Re-Ranker   |
-               |  FAISS Index + MiniLM     |                   | (Top-k candidates -> top) |
-               +---------------------------+                   +---------------------------+
-                             |                                               |
-                             +-----------------------+-----------------------+
-                                                     |
-                                                     v
-                                +-----------------------------------------+
-                                |          LangChain Orchestration        |
-                                |          (Prompt Template + Context)    |
-                                +-----------------------------------------+
-                                                     |
-                                                     v
-                                +-----------------------------------------+
-                                |          Llama 3.1 Engine               |
-                                +-----------------------------------------+
-                                                     |
-                                                     v
-                                +-----------------------------------------+
-                                |        Formatted Clinical Response      |
-                                +-----------------------------------------+
+|              Next.js Client             |
++-----------------------------------------+
+                    |
+          HTTP POST /api/v1/query
+                    |
+                    v
++-----------------------------------------+
+|             FastAPI Backend             |
++-----------------------------------------+
+                    |
+        +-----------+-----------+
+        |                       |
+        v                       v
++---------------------+   +-------------------------+
+| Dense Vector Search |   | Cross-Encoder Re-Ranker |
+| FAISS + MiniLM      |   | Top-k -> Top-n          |
++---------------------+   +-------------------------+
+        |                       |
+        +-----------+-----------+
+                    |
+                    v
++-----------------------------------------+
+|        LangChain Orchestration          |
+| Prompt + Retrieved Context + Guardrails |
++-----------------------------------------+
+                    |
+                    v
++-----------------------------------------+
+|           Llama 3.1 Inference           |
++-----------------------------------------+
+                    |
+                    v
++-----------------------------------------+
+|     Structured Clinical Response        |
++-----------------------------------------+
+```
 
-### Pipeline Sequence
-1. **Query Ingestion:** User inputs a natural language question via the Next.js interface.
-2. **Dense Vector Retrieval:** Query is embedded using `all-MiniLM-L6-v2` and searched against a local FAISS vector index, pulling the top-20 candidate passages ($k=20$).
-3. **Cross-Encoder Re-Ranking:** Candidates pass through a re-ranking model to filter down to the top-4 ($k=4$) highest-scoring passages based on exact context matches.
-4. **Contextual Ingestion & Synthesis:** LangChain constructs a grounded prompt combining user query, strict system guardrails, and filtered passages.
-5. **LLM Generation:** Llama 3.1 synthesizes a structured, patient-accessible response.
+## Pipeline Sequence
 
+### 1. Query Ingestion
 
-## 3. Tech Stack
+Users submit a natural language medical question through the Next.js frontend.
 
-* **Frontend:** Next.js (App Router), TypeScript, Tailwind CSS
-* **Backend API:** Python 3.11, FastAPI, Uvicorn
-* **Orchestration & LLM:** LangChain, Meta Llama 3.1
-* **Vector Store & Embeddings:** FAISS (Flat IP / L2 Index), HuggingFace Sentence-Transformers (`all-MiniLM-L6-v2`)
-* **Re-Ranking:** `ms-marco-MiniLM-L-6-v2` cross-encoder
+### 2. Dense Vector Retrieval
 
-## 4. Key Engineering Decisions & Benchmarks
+- Query embedding generated using **all-MiniLM-L6-v2**
+- Search performed against a local **FAISS** vector index
+- Retrieves the **top-20 candidate passages (k = 20)**
 
-### FAISS Vector Index Selection
-* **Context:** Evaluated PGVector, Pinecone, and FAISS.
-* **Decision:** Selected FAISS for local, in-memory vector index processing.
-* **Trade-off:** Eliminates external network hop overhead to managed cloud vector databases during evaluation. Given the target dataset sizing (under 50,000 document chunks), in-memory FAISS flat indexes deliver sub-10ms lookup times without maintaining cloud infrastructure dependencies.
+### 3. Cross-Encoder Re-Ranking
 
-### Embedding Model Trade-offs (`all-MiniLM-L6-v2`)
-* **Context:** Evaluated OpenAI `text-embedding-ada-002` vs lightweight open-weights models (`all-MiniLM-L6-v2`, `bge-small-en`).
-* **Decision:** Deployed `all-MiniLM-L6-v2` locally on backend instances.
-* **Trade-off:** Keeps latency minimal (~12ms encoding speed per query on CPU) and zero operational API cost per query, while retaining strong zero-shot retrieval accuracy over domain-specific biomedical text.
+Candidate passages are evaluated using a cross-encoder model.
 
-### Two-Pass Retrieval (Re-Ranking Step)
-* **Problem:** Direct top-k similarity retrieval ($k=5$) frequently pulled chunks that matched generic medical vocabulary but lacked actual semantic answers to specific patient conditions.
-* **Solution:** Configured dense vector search to pull a wider candidate pool ($k=20$), followed by a cross-encoder re-ranking pass down to $k=4$.
-* **Measured Impact:**
-  * **Retrieval Latency:** Reduced overall query pipeline execution time by **~25%** by cutting the token context window fed to Llama 3.1 from ~3,500 tokens to under 1,000 tokens.
-  * **Answer Accuracy:** Reduced hallucination and irrelevant citation rates on standard medical QA test sets.
+The highest-quality **top-4 passages (k = 4)** are selected based on semantic relevance rather than embedding similarity alone.
 
-## 5. Local Setup & Installation
+### 4. Context Construction
 
-### Prerequisites
-* Node.js v18+
-* Python 3.10+
-* GPU optional (Runs CPU-bound or via Ollama / local inference provider for Llama 3.1)
+LangChain assembles:
 
-### 1. Clone the Repository
-git clone [https://github.com/Krish6115/Doc_Assist.git](https://github.com/Krish6115/Doc_Assist.git)
+- User query
+- Retrieved passages
+- Prompt template
+- System guardrails
+
+into a grounded prompt.
+
+### 5. LLM Response Generation
+
+Llama 3.1 synthesizes a structured, patient-friendly response using only the verified context.
+
+---
+
+# 3. Tech Stack
+
+### Frontend
+
+- Next.js (App Router)
+- TypeScript
+- Tailwind CSS
+
+### Backend
+
+- Python 3.11
+- FastAPI
+- Uvicorn
+
+### LLM Orchestration
+
+- LangChain
+- Meta Llama 3.1
+
+### Embeddings & Vector Search
+
+- FAISS
+- Hugging Face Sentence Transformers
+- `all-MiniLM-L6-v2`
+
+### Re-Ranking
+
+- `cross-encoder/ms-marco-MiniLM-L-6-v2`
+
+---
+
+# 4. Key Engineering Decisions & Benchmarks
+
+## FAISS Vector Index Selection
+
+### Context
+
+Evaluated:
+
+- PGVector
+- Pinecone
+- FAISS
+
+### Decision
+
+Selected **FAISS** for local, in-memory vector indexing.
+
+### Trade-off
+
+Given the target corpus size (<50,000 chunks), FAISS delivers:
+
+- Sub-10 ms retrieval
+- Zero network latency
+- No managed infrastructure dependency
+- Low operational complexity
+
+---
+
+## Embedding Model Selection
+
+### Models Evaluated
+
+- OpenAI `text-embedding-ada-002`
+- `all-MiniLM-L6-v2`
+- `bge-small-en`
+
+### Decision
+
+Selected **all-MiniLM-L6-v2**.
+
+### Trade-off
+
+Benefits include:
+
+- ~12 ms CPU encoding
+- Zero API cost
+- Strong biomedical retrieval quality
+- Lightweight deployment
+
+---
+
+## Two-Pass Retrieval Pipeline
+
+### Problem
+
+Direct Top-k retrieval often returns passages sharing generic medical terminology while missing the actual answer.
+
+### Solution
+
+1. Retrieve Top-20 candidates using FAISS
+2. Re-rank candidates
+3. Keep only Top-4 passages
+
+### Measured Impact
+
+**Latency**
+
+- Reduced overall pipeline latency by approximately **25%**
+- Context size reduced from roughly **3,500 tokens** to **<1,000 tokens**
+
+**Answer Quality**
+
+- Lower hallucination rate
+- More relevant citations
+- Better grounding on medical QA benchmarks
+
+---
+
+# 5. Local Setup & Installation
+
+## Prerequisites
+
+- Node.js 18+
+- Python 3.10+
+- GPU optional (supports CPU inference or Ollama/local Llama 3.1 deployment)
+
+---
+
+## Clone Repository
+
+```bash
+git clone https://github.com/Krish6115/Doc_Assist.git
+
 cd Doc_Assist
-2. Backend Setup
-Bash
+```
+
+---
+
+## Backend Setup
+
+```bash
 cd backend
 
-# Create virtual environment
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-# Install dependencies
+# Linux / macOS
+source venv/bin/activate
+
+# Windows
+venv\Scripts\activate
+
 pip install -r requirements.txt
 
-# Configure Environment Variables
 cp .env.example .env
-Configure .env:
+```
 
-Code snippet
+### Configure `.env`
+
+```env
 LLM_API_KEY=your_llama_3.1_api_key_or_endpoint
-EMBEDDING_MODEL_NAME=sentence-transformers/all-MiniLM-L6-v2
-FAISS_INDEX_PATH=./data/faiss_index
-Start the API backend:
 
-Bash
+EMBEDDING_MODEL_NAME=sentence-transformers/all-MiniLM-L6-v2
+
+FAISS_INDEX_PATH=./data/faiss_index
+```
+
+Start the backend:
+
+```bash
 uvicorn main:app --reload --port 8000
-3. Frontend Setup
-Bash
+```
+
+---
+
+## Frontend Setup
+
+```bash
 cd ../frontend
 
-# Install dependencies
 npm install
 
-# Configure Environment Variables
 cp .env.example .env.local
-Configure .env.local:
+```
 
-Code snippet
+### Configure `.env.local`
+
+```env
 NEXT_PUBLIC_API_BASE_URL=http://localhost:8000/api/v1
-Start the Next.js development server:
+```
 
-Bash
+Start the frontend:
+
+```bash
 npm run dev
-6. API Usage Example
-Request
-POST /api/v1/query
+```
 
-JSON
+---
+
+# 6. API Usage Example
+
+## Request
+
+**POST**
+
+```
+/api/v1/query
+```
+
+### Body
+
+```json
 {
   "query": "What are the contraindications for taking metformin alongside standard renal function impairment?",
   "top_k": 4
 }
-Response
-JSON
+```
+
+---
+
+## Response
+
+```json
 {
   "query": "What are the contraindications for taking metformin alongside standard renal function impairment?",
   "answer": "Metformin is contraindicated in patients with severe renal impairment, specifically defined as an estimated glomerular filtration rate (eGFR) below 30 mL/min/1.73 m². Starting metformin is not recommended in patients with an eGFR between 30 and 45 mL/min/1.73 m² without close monitoring due to increased risk of lactic acidosis.",
@@ -169,21 +330,40 @@ JSON
     "total_latency_ms": 654.7
   }
 }
+```
 
-7. Known Limitations & Roadmap
-Known Limitations
-Authentication: Currently lacks user role-based access control (RBAC) and clinical data privacy enforcement (HIPAA/GDPR compliance modules not enabled in local dev mode).
+---
 
-Corpus Scaling: Local FAISS index relies on in-memory loading, capping real-time corpus scale to memory limits (~500,000 passages).
+# 7. Known Limitations & Roadmap
 
-Sync Responses: Responses are currently returned synchronously; large generations can cause temporary UI loading state holds.
+## Known Limitations
 
-Future Improvements
-[ ] Streaming Responses: Implement Server-Sent Events (SSE) or WebSockets in FastAPI + Next.js UI to lower Time-to-First-Token (TTFT).
+### Authentication
 
-[ ] Distributed Vector Store: Transition from in-memory FAISS to Qdrant or Milvus cluster for large multi-tenant setups.
+No role-based access control (RBAC) or clinical privacy enforcement is currently implemented.
 
-[ ] Hybrid Search: Combine BM25 keyword search with dense vector embeddings to improve medical code (ICD-10, CPT) exact match queries.
+HIPAA/GDPR compliance modules are disabled in local development.
 
-8. License and Note
-Distributed under the MIT License. See LICENSE for more information.
+### Corpus Scaling
+
+The in-memory FAISS index limits corpus size based on available system memory (approximately 500,000 passages).
+
+### Synchronous Responses
+
+Responses are generated synchronously, resulting in longer UI loading states for lengthy generations.
+
+---
+
+## Future Improvements
+
+- [ ] Streaming responses using Server-Sent Events (SSE) or WebSockets to reduce Time-to-First-Token (TTFT)
+- [ ] Distributed vector store using Qdrant or Milvus for large-scale, multi-tenant deployments
+- [ ] Hybrid retrieval combining BM25 keyword search with dense embeddings for improved ICD-10 and CPT code matching
+
+---
+
+# 8. License
+
+This project is distributed under the **MIT License**.
+
+See the `LICENSE` file for more information.
